@@ -87,9 +87,30 @@ public:
     size_t end() const { return m_end; }
     size_t size() const { return m_end - m_start; }
 
+    void set_local(Local local, NodeData value) { 
+        m_locals[(size_t) local - (size_t) Local::Zero] = value; 
+    }
+
+    void set_argument(Argument argument, NodeData value) { 
+        m_arguments[(size_t) argument- (size_t) Argument::Zero] = value; 
+    }
+
+    ErrorOr<NodeData> local(size_t i) { 
+        VERIFY(i < 6);
+        return m_locals[i]; 
+    }
+
+    ErrorOr<NodeData> argument(size_t i) { 
+        VERIFY(i < 7);
+        return m_arguments[i]; 
+    }
+
 protected:
     RefPtr<Node> m_root, m_scope;
+
     size_t m_start, m_end, m_table_index;
+    NodeData m_locals[8];
+    NodeData m_arguments[7];
 };
 
 class Interpreter {
@@ -100,7 +121,7 @@ public:
     }
 
     ErrorOr<void> load(TableStream const& stream, bool ignore_block_header);
-    ErrorOr<NodeData> evaluate(NameString const& path);
+    ErrorOr<NodeData> evaluate(NameString const& path, Optional<NodeData> value_to_write, Optional<Vector<NodeData>> arguments);
     void print_namespace() const;
 
 protected:
@@ -110,8 +131,12 @@ protected:
         FinalizingOpcode
     };
 
-    ErrorOr<NodeData> evaluate(RefPtr<Node> node);
-    ErrorOr<void> evaluate(RefPtr<Node> node, NodeData value_to_write);
+    ErrorOr<void> store(NodeData &target, NodeData value);
+
+    ErrorOr<NodeData> evaluate(RefPtr<Node> const& node, Optional<NodeData> value_to_write, Optional<Vector<NodeData>> arguments);
+    ErrorOr<NodeData> evaluate_field(RefPtr<Node> const& node, Optional<NodeData> value_to_write);
+    ErrorOr<NodeData> evaluate_name(RefPtr<Node> const& node, Optional<NodeData> value_to_write);
+    ErrorOr<NodeData> evaluate_method(RefPtr<Node> const& node, Optional<NodeData> value_to_write, Optional<Vector<NodeData>> arguments);
 
     ErrorOr<void> initialize_namespace();
     ErrorOr<IterationDecision> cycle(TableStream& stream);

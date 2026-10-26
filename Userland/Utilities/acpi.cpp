@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+#include <LibACPI/NameString.h>
 #include <LibACPI/Interpreter.h>
 #include <LibACPI/TableStream.h>
 #include <LibCore/ArgsParser.h>
@@ -17,11 +18,13 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     // FIXME: Multiple commands outside of debugging.
     // FIXME: Interactive mode.
     bool ignore_block_header = false;
+    bool eval_main = false;
     Vector<StringView> input_files;
 
     Core::ArgsParser args_parser;
     args_parser.set_general_help("ACPI management utility.");
     args_parser.add_option(ignore_block_header, "Treats the input file as not containing the block header.", "ignore-block-header", 'i');
+    args_parser.add_option(eval_main, "Evaluates the method named 'MAIN' in the root of the table after parsing.", "eval-main", 'm');
     args_parser.add_positional_argument(input_files, "Files containing AML table bytecode to load.", "input");
     args_parser.parse(arguments);
 
@@ -108,5 +111,12 @@ ErrorOr<int> serenity_main(Main::Arguments arguments)
     }
 
     interpreter.print_namespace();
+    if (eval_main)
+    {
+        auto name = TRY(ACPI::NameString::from_string("MAIN"sv));
+        auto value = TRY(interpreter.evaluate(name, {}, {}));
+        auto integer = TRY(value.as_integer());
+        dbgln("{}", integer);
+    }
     return 0;
 }

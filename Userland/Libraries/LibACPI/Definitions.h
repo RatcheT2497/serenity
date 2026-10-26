@@ -49,7 +49,10 @@ enum class Opcode : u16 {
     Arg5Op = 0x006D,
     Arg6Op = 0x006E,
 
+    StoreOp = 0x70,
+    AddOp = 0x72,
     ShiftLeftOp = 0x79,
+    ReturnOp = 0xA4,
 
     MutexOp = 0x5B01,
     RevisionOp = 0x5B30,

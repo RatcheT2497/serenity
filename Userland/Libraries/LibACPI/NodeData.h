@@ -6,10 +6,12 @@
 
 #pragma once
 
+#include "Definitions.h"
 #include "NameString.h"
 #include <AK/String.h>
 #include <AK/Types.h>
 #include <AK/Variant.h>
+#include <LibWeb/HTML/TagNames.h>
 
 namespace ACPI {
 
@@ -26,62 +28,76 @@ protected:
     ByteBuffer m_buffer;
 };
 
+/*
+ * CopyObject(src: NodeData, target: NodeData) {
+ *     switch target.type {
+ *         case LocalX:  Overwrite LocalX.
+ *         case NAME:    Overwrite NAME.
+ *         case ArgX:    Overwrite ArgX unless ArgX is a reference, in which case overwrite the referenced object.
+ *         case IndexOf: Overwrite object stored at index.
+ *
+ *         case RefOf: 
+ *         default: 
+ *             Not allowed.
+ *     }
+ * }
+ */
 class Node;
 class NodeData {
 public:
+    using DataVariant = Variant<Local, Argument, NameString, ByteBuffer, u64, Buffer, Vector<NodeData>>;
     enum class Type : u8 {
         None,
-        Integer,
-        String,
-        Buffer,
-        Package,
-        NameString
+        Integer, // Name
+        String, // Name
+        Buffer, // Name
+        Package, // Name
+        NameString,
+        Argument,
+        Local,
+        DebugObject
     };
+
+    static NodeData from_integer(u64 value);
+    static NodeData from_buffer(Buffer value);
+    static NodeData from_string(ByteBuffer value);
+    static NodeData from_package(Vector<NodeData> value);
+    static NodeData from_namestring(NameString value);
+    static NodeData from_local(Local value);
+    static NodeData from_argument(Argument value);
+    static NodeData make_debug();
 
     NodeData()
         : m_type(Type::None)
         , m_data(0)
     {
     }
-    NodeData(i64 value)
-        : m_type(Type::Integer)
-        , m_data(value)
-    {
-    }
-    NodeData(Buffer const& value)
-        : m_type(Type::Buffer)
-        , m_data(value)
-    {
-    }
-    NodeData(ByteBuffer const& value)
-        : m_type(Type::String)
-        , m_data(value)
-    {
-    }
-    NodeData(Vector<NodeData> const& value)
-        : m_type(Type::Package)
-        , m_data(value)
-    {
-    }
-    NodeData(NameString const& value)
-        : m_type(Type::NameString)
-        , m_data(value)
-    {
-    }
 
     Type type() const { return m_type; }
 
     ErrorOr<NameString> as_namestring();
-    ErrorOr<i64> as_integer();
-
+    ErrorOr<u64> as_integer();
     ErrorOr<StringView> as_string_view();
     ErrorOr<ByteBuffer> as_string_raw();
-
+    ErrorOr<Argument> as_argument();
+    ErrorOr<Local> as_local();
     ErrorOr<Buffer*> as_buffer_ptr();
 
+    ErrorOr<void> store(NodeData &source);
+    ErrorOr<void> copy_object(NodeData &source);
+
 protected:
+    using InnerData = Variant<Local, Argument, u64, NameString, Buffer, ByteBuffer, Vector<NodeData>>;
+    NodeData(Type type)
+        : m_type(type)
+        , m_data(0)
+    {
+    }
+
     Type m_type { Type::None };
-    Variant<NameString, ByteBuffer, i64, Buffer, Vector<NodeData>> m_data;
+    InnerData m_data;
+
+    NodeData(Type type, InnerData data) : m_type(type), m_data(data) {}
 };
 
 }

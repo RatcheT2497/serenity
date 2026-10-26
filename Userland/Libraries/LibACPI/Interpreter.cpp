@@ -9,22 +9,34 @@
 #include <AK/RefPtr.h>
 #include <AK/StdLibExtras.h>
 #include <LibACPI/Node.h>
+#include <LibWeb/HTML/AttributeNames.h>
 
-#define INTERPRETER_ERROR(fnname, simple, message, ...) \
+#define INTERPRETER_ERROR(ecode, message, ...) \
     do {                                                \
-        warn("[LibACPI] Interpreter::" fnname ": ");    \
+        warn("[LibACPI] Interpreter::{}: ", __func__);    \
         warnln(message __VA_OPT__(, ) __VA_ARGS__);     \
-        return Error::from_string_literal(simple);      \
+        return Error::from_errno(ecode);      \
     } while (0);
 
-#define STATIC_ERROR(fnname, simple, message, ...)  \
+#define STATIC_ERROR(ecode, message, ...)  \
     do {                                            \
-        warn("[LibACPI] " fnname ": ");             \
+        warn("[LibACPI] {}: ", __func__);             \
         warnln(message __VA_OPT__(, ) __VA_ARGS__); \
-        return Error::from_string_literal(simple);  \
+        return Error::from_errno(ecode);  \
     } while (0);
 
 namespace ACPI {
+
+static size_t round_to_next_power_of_2(size_t n)
+{
+    // FIXME: Figure out how AK::round_up_to_power_of_two works and replace this.
+    size_t v = 1;
+    while (v < n) {
+        v *= 2;
+    }
+    
+    return v;
+}
 
 ErrorOr<RefPtr<Node>> ScopeFrame::find_node(NameString const& path)
 {
@@ -63,6 +75,12 @@ ErrorOr<void> ScopeFrame::insert_node(NameString const& path, RefPtr<Node> const
     auto basename = TRY(path.basename());
     TRY(target->insert_child(basename, node));
     return {};
+}
+
+ErrorOr<NodeData> Interpreter::evaluate(NameString const& path, Optional<NodeData> value_to_write, Optional<Vector<NodeData>> arguments)
+{
+    auto node = TRY(Node::find_node(path, m_namespace_root));
+    return evaluate(node, value_to_write, arguments);
 }
 
 void Interpreter::print_namespace() const
@@ -111,13 +129,13 @@ ErrorOr<void> Interpreter::initialize_namespace()
     TRY(m_namespace_root->insert_child("_SB_"sv, make_ref_counted<DeviceNode>()));
     TRY(m_namespace_root->insert_child("_TZ_"sv, make_ref_counted<DeviceNode>()));
 
-    TRY(m_namespace_root->insert_child("_REV"sv, make_ref_counted<NameNode>(revision)));
+    TRY(m_namespace_root->insert_child("_REV"sv, make_ref_counted<NameNode>(NodeData::from_integer(revision))));
     TRY(m_namespace_root->insert_child("_GL_"sv, make_ref_counted<MutexNode>(0)));
     TRY(m_namespace_root->insert_child("_OSI"sv, make_ref_counted<MethodNode>(osi_method_table_index, osi_method_start, osi_method_end, osi_method_flags)));
 
     ByteBuffer os_buffer;
     TRY(os_buffer.try_append(os_name.bytes()));
-    TRY(m_namespace_root->insert_child("_OS_"sv, make_ref_counted<NameNode>(os_buffer)));
+    TRY(m_namespace_root->insert_child("_OS_"sv, make_ref_counted<NameNode>(NodeData::from_string(os_buffer))));
     return {};
 }
 
@@ -142,15 +160,100 @@ void Interpreter::debug_print_header(TableStream& stream, size_t operand_index)
     dbg("        ");
 }
 
+/*
+ * Store(src: NodeData, target: NodeData) {
+ *     switch target.type {
+ *         case LocalX: 
+ *         case IndexOf: Overwrite unless target is a reference, in that case store to the referenced object WITH implicit cast.
+ *         case ArgX:    Overwrite unless the object is a reference, in which case overwrite the referenced object.
+ *         case NAME:    Store with implicit cast.
+ *         case RefOf: Default: 
+ *             Not allowed.
+ *     }
+ * }
+ */
+ErrorOr<void> Interpreter::store(NodeData &target, NodeData value)
+{
+    auto &top_scope_frame = m_scope_frames.top();
+    switch (target.type())
+    {
+    case NodeData::Type::Local:
+    {
+        auto local= TRY(target.as_local());
+        top_scope_frame.set_local(local, value);
+        break;
+    }
+    case NodeData::Type::Argument:
+    {
+        auto argument= TRY(target.as_argument());
+        top_scope_frame.set_argument(argument, value);
+        break;
+    }
+    case NodeData::Type::NameString:
+    {
+        auto ns = TRY(target.as_namestring());
+        auto target = TRY(top_scope_frame.find_node(ns));
+        auto name_node = static_ptr_cast<NameNode>(target);
+        auto &data = name_node->data();
+        TRY(data.store(value));
+        break;
+    }
+    case NodeData::Type::DebugObject:
+    {
+        StringBuilder sb;
+        if (value.type() == NodeData::Type::Local)
+        {
+            value = TRY(top_scope_frame.local(TRY(value.as_integer())));
+        } else if (value.type() == NodeData::Type::Argument)
+        {
+            value = TRY(top_scope_frame.argument(TRY(value.as_integer())));
+        }
+
+        switch (value.type())
+        {
+        case NodeData::Type::Integer:
+        {
+            auto integer = TRY(value.as_integer());
+            dbgln("[LibACPI] Debug output: {}", integer);
+            return {};
+        }
+        default:
+            INTERPRETER_ERROR(ENOTSUP, "Node data type {} not supported!", (size_t) value.type());
+        }
+        break;
+    }
+    default:
+        INTERPRETER_ERROR(ENOTSUP, "Can't store into target {}!", (u16) target.type());
+    }
+    return {};
+}
+
 ErrorOr<NodeData> Interpreter::finalize_value_opcode(OpcodeFrame& frame)
 {
     switch (frame.opcode()) {
+    case (u16)Opcode::Local0Op:
+    case (u16)Opcode::Local1Op:
+    case (u16)Opcode::Local2Op:
+    case (u16)Opcode::Local3Op:
+    case (u16)Opcode::Local4Op:
+    case (u16)Opcode::Local5Op:
+    case (u16)Opcode::Local6Op:
+    case (u16)Opcode::Local7Op:
+        return NodeData::from_local(static_cast<Local>(frame.opcode()));
+    case (u16)Opcode::Arg0Op:
+    case (u16)Opcode::Arg1Op:
+    case (u16)Opcode::Arg2Op:
+    case (u16)Opcode::Arg3Op:
+    case (u16)Opcode::Arg4Op:
+    case (u16)Opcode::Arg5Op:
+    case (u16)Opcode::Arg6Op:
+        return NodeData::from_argument(static_cast<Argument>(frame.opcode()));
     case (u16)Opcode::ZeroOp:
-        return 0;
+        return NodeData::from_integer(0);
     case (u16)Opcode::OneOp:
-        return 1;
+        return NodeData::from_integer(1);
     case (u16)Opcode::OnesOp:
-        return 0xffffffffffffffff;
+        return NodeData::from_integer(0xffffffffffffffff);
     case (u16)Opcode::BytePrefix:
     case (u16)Opcode::WordPrefix:
     case (u16)Opcode::DWordPrefix:
@@ -168,7 +271,7 @@ ErrorOr<NodeData> Interpreter::finalize_value_opcode(OpcodeFrame& frame)
     }
     case (u16)Opcode::PackageOp: {
         frame.remove(0, 2);
-        return NodeData(frame);
+        return NodeData::from_package(frame);
     }
     // FIXME: Implement all other arithmetic opcodes.
     case (u16)Opcode::ShiftLeftOp: {
@@ -176,11 +279,24 @@ ErrorOr<NodeData> Interpreter::finalize_value_opcode(OpcodeFrame& frame)
         auto shift_count = TRY(frame[1].as_integer());
         auto target = frame[2];
         // FIXME: Add support for storing data into nodes.
-        VERIFY(TRY(target.as_integer()) == 0);
-        return operand << shift_count;
+        auto result = NodeData::from_integer(operand << shift_count);
+
+        TRY(store(target, result));
+        return result;
+    }
+    case (u16)Opcode::AddOp: {
+        auto left= TRY(frame[0].as_integer());
+        auto right= TRY(frame[1].as_integer());
+        auto &target = frame[2];
+        auto result = NodeData::from_integer(left + right);
+        dbgln("{} + {} = {}", left, right, TRY(result.as_integer()));
+
+        TRY(store(target, result));
+        return result;
     }
     default:
-        INTERPRETER_ERROR("finalize_value_opcode", "Unimplemented!", "Unimplemented value opcode {:04X}!", frame.opcode());
+                                   
+        INTERPRETER_ERROR(ENOTSUP, "Unimplemented value opcode {:04X}!", frame.opcode());
     }
     VERIFY_NOT_REACHED();
 }
@@ -191,10 +307,16 @@ ErrorOr<void> Interpreter::finalize_term_opcode(OpcodeFrame& frame, TableStream&
     case (u16)Opcode::ScopeOp: {
         auto length = TRY(frame[0].as_integer());
         auto path = TRY(frame[1].as_namestring());
-        auto scope = TRY(m_scope_frames.top().find_node(path));
-
-        auto scope_frame = ScopeFrame(m_namespace_root, scope, frame.start(), frame.start() + length + 1, m_loaded_tables.size() - 1);
-        m_scope_frames.push(scope_frame);
+        auto scope = m_scope_frames.top().find_node(path);
+        if (scope.is_error())
+        {
+            warnln("[LibACPI] Interpreter::finalize_term_opcode: Could not find root node for Scope operation; Skipping...");
+            TRY(stream.seek(frame.start() + length + 1));
+        } else {
+            auto scope_node = scope.release_value();
+            auto scope_frame = ScopeFrame(m_namespace_root, scope_node, frame.start(), frame.start() + length + 1, m_loaded_tables.size() - 1);
+            m_scope_frames.push(scope_frame);
+        }
         return {};
     }
     case (u16)Opcode::ProcessorOp: {
@@ -279,6 +401,20 @@ ErrorOr<void> Interpreter::finalize_term_opcode(OpcodeFrame& frame, TableStream&
         TRY(stream.seek(length, SeekMode::FromCurrentPosition));
         return {};
     }
+
+    case (u16)Opcode::ReturnOp:
+    {
+        auto const& value = frame[0];
+        (void) value;
+        return {};
+    }
+    case (u16)Opcode::StoreOp: 
+    {
+        auto value = frame[0];
+        auto &target = frame[1];
+        TRY(store(target, value));
+        return {};
+    }
     case (u16)Opcode::FieldOp:
         // DefField := FieldOp PkgLength NameString FieldFlags FieldList
         m_opcode_frames.top().m_field_offset = 0;
@@ -319,10 +455,16 @@ ErrorOr<void> Interpreter::finalize_term_opcode(OpcodeFrame& frame, TableStream&
         TRY(m_scope_frames.top().insert_node(path, node));
         return {};
     }
+    case (u16)Opcode::ShiftLeftOp:
+    case (u16)Opcode::AddOp:
+    {
+        (void) TRY(finalize_value_opcode(frame));
+        return {};
+    }
     default:
         break;
     }
-    INTERPRETER_ERROR("finalize_term_opcode", "Unimplemented!", "Unimplemented term opcode {:04X}!", frame.opcode());
+    INTERPRETER_ERROR(ENOTSUP, "Unimplemented term opcode {:04X}!", frame.opcode());
 }
 
 ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOpcode operand)
@@ -363,7 +505,7 @@ ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOp
             return IterationDecision::Continue;
         }
         default: {
-            INTERPRETER_ERROR("load", "Unimplemented field type!", "Unimplemented field type {:02X}!", type);
+            INTERPRETER_ERROR(ENOTSUP, "Unimplemented field type {:02X}!", type);
         }
         }
 
@@ -372,49 +514,79 @@ ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOp
     case MetaOpcode::NameString: {
         auto value = TRY(stream.read_name_string());
         dbgln("Reading namestring... ({})", value.to_string());
-        top_opcode_frame.append(value);
+        top_opcode_frame.append(NodeData::from_namestring(value));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
     case MetaOpcode::PackageLength: {
         auto length = TRY(stream.read_package_length());
         dbgln("Reading package length... 0x({:X})", length);
-        top_opcode_frame.append(NodeData((u64)length));
+        top_opcode_frame.append(NodeData::from_integer(length));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
     case MetaOpcode::ByteData: {
         auto value = TRY(stream.read_value<u8>());
         dbgln("Reading byte... ({})", value);
-        top_opcode_frame.append(NodeData((u8)value));
+        top_opcode_frame.append(NodeData::from_integer(value));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
     case MetaOpcode::WordData: {
         auto value = TRY(stream.read_value<u16>());
         dbgln("Reading word... ({})", value);
-        top_opcode_frame.append(NodeData((u16)value));
+        top_opcode_frame.append(NodeData::from_integer(value));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
     case MetaOpcode::DWordData: {
         auto value = TRY(stream.read_value<u32>());
         dbgln("Reading dword... ({})", value);
-        top_opcode_frame.append(NodeData((u32)value));
+        top_opcode_frame.append(NodeData::from_integer(value));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
     case MetaOpcode::QWordData: {
         auto value = TRY(stream.read_value<u64>());
         dbgln("Reading qword... ({})", value);
-        top_opcode_frame.append(NodeData((u64)value));
+        top_opcode_frame.append(NodeData::from_integer(value));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
     case MetaOpcode::String: {
         dbgln("Reading string...");
         auto value = TRY(stream.read_string());
-        top_opcode_frame.append(NodeData(value));
+        top_opcode_frame.append(NodeData::from_string(value));
+        TRY(top_opcode_frame.finish_operand(stream.offset()));
+        break;
+    }
+    case MetaOpcode::SuperName: {
+        auto opcode= TRY(stream.peek_opcode());
+        dbg("Reading supername...");
+        if (TableStream::is_namestring_start(opcode))
+        {
+            auto path = TRY(stream.read_name_string());
+            top_opcode_frame.append(NodeData::from_namestring(path));
+            dbgln(" (Namestring: {})", TRY(path.to_string()));
+        } else if (opcode >= (u16)Opcode::Arg0Op && opcode <= (u16)Opcode::Arg6Op)
+        {
+            TRY(stream.read_opcode());
+            top_opcode_frame.append(NodeData::from_argument(static_cast<Argument>(opcode)));
+            dbgln(" (Argument: {:02X})", opcode);
+        } else if (opcode >= (u16)Opcode::Local0Op && opcode <= (u16)Opcode::Local7Op)
+        {
+            TRY(stream.read_opcode());
+            top_opcode_frame.append(NodeData::from_local(static_cast<Local>(opcode)));
+            dbgln(" (Local: {:02X})", opcode);
+        } else if (opcode == (u16)Opcode::DebugOp)
+        {
+            TRY(stream.read_opcode());
+            top_opcode_frame.append(NodeData::make_debug());
+            dbgln(" (Debug)");
+        } else {
+            INTERPRETER_ERROR(EINVAL, "Expected supername opcode, got {:04X}!", opcode);
+        }
+
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
@@ -425,12 +597,13 @@ ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOp
 
         auto count = top_opcode_frame.counter().value();
         dbgln("Reading byte buffer of size {}...", (ssize_t)count);
-        ByteBuffer buffer;
-        buffer.resize(count);
 
+        ByteBuffer buffer;
+        TRY(buffer.try_resize(count));
         for (size_t i = 0; i < buffer_data_length; i++)
             buffer[i] = TRY(stream.read_value<u8>());
-        top_opcode_frame.append(NodeData(Buffer(buffer)));
+
+        top_opcode_frame.append(NodeData::from_buffer(Buffer(buffer)));
         TRY(top_opcode_frame.finish_operand(stream.offset()));
         break;
     }
@@ -442,7 +615,7 @@ ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOp
         if (TableStream::is_namestring_start(initial)) {
             auto ns = TRY(stream.read_name_string());
             dbgln(" ({})", ns.to_string());
-            top_opcode_frame.append(ns);
+            top_opcode_frame.append(NodeData::from_namestring(ns));
             TRY(top_opcode_frame.finish_operand(stream.offset()));
             return IterationDecision::Continue;
         }
@@ -453,6 +626,48 @@ ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOp
     }
 
     case MetaOpcode::Target:
+    {
+        dbg("Reading target...");
+        auto initial = TRY(stream.peek_value<u8>());
+        if (initial == (u8) Opcode::DebugOp)
+        {
+            (void) TRY(stream.read_value<u8>());
+
+            dbgln(" (DEBUG)");
+            top_opcode_frame.append(NodeData::make_debug());
+            TRY(top_opcode_frame.finish_operand(stream.offset()));
+            return IterationDecision::Continue;
+        } 
+        if (initial >= (u8) Opcode::Local0Op && initial <= (u8) Opcode::Local7Op)
+        {
+            (void) TRY(stream.read_value<u8>());
+
+            dbgln(" (LOCAL {})", initial - (u16)Opcode::Local0Op);
+            top_opcode_frame.append(NodeData::from_local(static_cast<Local>(initial)));
+            TRY(top_opcode_frame.finish_operand(stream.offset()));
+            return IterationDecision::Continue;
+        }
+        if (initial >= (u8) Opcode::Arg0Op && initial <= (u8) Opcode::Arg6Op)
+        {
+            (void) TRY(stream.read_value<u8>());
+
+            dbgln(" (ARG {})", initial - (u16)Opcode::Arg0Op);
+            top_opcode_frame.append(NodeData::from_argument(static_cast<Argument>(initial)));
+            TRY(top_opcode_frame.finish_operand(stream.offset()));
+            return IterationDecision::Continue;
+        }
+        if (TableStream::is_namestring_start(initial))
+        {
+            auto ns = TRY(NameString::from_table_stream(stream));
+
+            dbgln(" (NAMESTRING)");
+            top_opcode_frame.append(NodeData::from_namestring(ns));
+            TRY(top_opcode_frame.finish_operand(stream.offset()));
+            return IterationDecision::Continue;
+
+        }
+        INTERPRETER_ERROR(ENOTSUP, "'Target' object opcode not supported! ({})", initial);
+    }
     case MetaOpcode::DataRefObject:
     case MetaOpcode::TermArg: {
         dbgln("Reading complex object {:04X}...", (u16)operand);
@@ -462,91 +677,142 @@ ErrorOr<IterationDecision> Interpreter::read_operand(TableStream& stream, MetaOp
     }
     default: {
         dbgln("Failure!");
-        INTERPRETER_ERROR("load", "Unimplemented operand type!", "Operand type {:04X} unimplemented!", (u16)operand);
+        INTERPRETER_ERROR(ENOTSUP, "Operand type {:04X} unimplemented!", (u16)operand);
     }
     }
     return IterationDecision::Continue;
 }
 
-static size_t round_to_next_power_of_2(size_t n)
+ErrorOr<NodeData> Interpreter::evaluate_field(RefPtr<Node> const& node, Optional<NodeData> value_to_write)
 {
-    // FIXME: Figure out how AK::round_up_to_power_of_two works and replace this.
-    size_t v = 1;
-    while (v < n) {
-        v *= 2;
-    }
-    return v;
-}
+    auto field_node = static_ptr_cast<FieldNode>(node);
+    auto field = field_node->field();
+    auto opregion = static_ptr_cast<OperationRegionNode>(field.operation_region());
 
-ErrorOr<NodeData> Interpreter::evaluate(RefPtr<Node> node)
-{
-    if (node->type() == NodeType::Field) {
-        auto field_node = static_ptr_cast<FieldNode>(node);
-        auto field = field_node->field();
-        auto opregion = static_ptr_cast<OperationRegionNode>(field.operation_region());
+    IntegerKind kind = IntegerKind::QWord;
+    switch (field.access()) {
+    case FieldAccess::Any: {
+        size_t size = round_to_next_power_of_2(field.size());
 
-        IntegerKind kind = IntegerKind::QWord;
-        switch (field.access()) {
-        case FieldAccess::Any: {
-            size_t size = round_to_next_power_of_2(field.size());
+        u64 max_bitsize = 32;
+        if (opregion->space() == RegionSpace::SystemMemory)
+            max_bitsize = 64;
 
-            u64 max_bitsize = 32;
-            if (opregion->space() == RegionSpace::SystemMemory)
-                max_bitsize = 64;
-
-            size = AK::clamp(size, 8, max_bitsize);
-            switch (size) {
-            case 8:
-                kind = IntegerKind::Byte;
-                break;
-            case 16:
-                kind = IntegerKind::Word;
-                break;
-            case 32:
-                kind = IntegerKind::DWord;
-                break;
-            case 64:
-                kind = IntegerKind::QWord;
-                break;
-            default:
-                INTERPRETER_ERROR("evaluate", "Invalid access size!", "Invalid access size: {}", size);
-            }
-            break;
-        }
-        case FieldAccess::Byte:
+        size = AK::clamp(size, 8, max_bitsize);
+        switch (size) {
+        case 8:
             kind = IntegerKind::Byte;
             break;
-        case FieldAccess::Word:
+        case 16:
             kind = IntegerKind::Word;
             break;
-        case FieldAccess::DWord:
+        case 32:
             kind = IntegerKind::DWord;
             break;
-        case FieldAccess::QWord:
+        case 64:
             kind = IntegerKind::QWord;
             break;
         default:
-            INTERPRETER_ERROR("evaluate", "Invalid field access!", "Invalid access: {}", (u32)field.access());
+            INTERPRETER_ERROR(EINVAL, "Invalid access size: {}", size);
         }
-
-        // FIXME: Implement missing region spaces.
-        u64 address = opregion->offset() + field.offset();
-        switch (opregion->space()) {
-        case RegionSpace::SystemMemory:
-            return TRY(m_callbacks.on_read_system_memory(kind, address));
-        case RegionSpace::PciConfig:
-            warnln("[LibACPI] PciConfig read from address {:08X}, but PciConfig reads not supported yet. Returning 0.", address);
-            return 0;
-        default:
-            INTERPRETER_ERROR("evaluate", "Operating region space not supported!", "Operating region space {:02X} not supported for evaluation!", opregion->space_raw());
-        }
-        VERIFY_NOT_REACHED();
-    } else if (node->type() == NodeType::Name) {
-        auto name_node = static_ptr_cast<NameNode>(node);
-        return name_node->data();
+        break;
+    }
+    case FieldAccess::Byte:
+        kind = IntegerKind::Byte;
+        break;
+    case FieldAccess::Word:
+        kind = IntegerKind::Word;
+        break;
+    case FieldAccess::DWord:
+        kind = IntegerKind::DWord;
+        break;
+    case FieldAccess::QWord:
+        kind = IntegerKind::QWord;
+        break;
+    default:
+        INTERPRETER_ERROR(EINVAL, "Invalid access: {}", (u32)field.access());
     }
 
-    INTERPRETER_ERROR("evaluate", "Cannot evaluate node type!", "Node type {} not supported for evaluation!", node->kind());
+    u64 address = opregion->offset() + field.offset();
+    if (value_to_write.has_value())
+    {
+        INTERPRETER_ERROR(ENOTSUP, "Writing unimplemented.");
+    }
+
+    // FIXME: Implement missing region spaces.
+    switch (opregion->space()) {
+    case RegionSpace::SystemMemory:
+        return NodeData::from_integer(TRY(m_callbacks.on_read_system_memory(kind, address)));
+    case RegionSpace::PciConfig:
+        warnln("[LibACPI] PciConfig read from address {:08X}, but PciConfig reads not supported yet. Returning 0.", address);
+        return NodeData::from_integer(0);
+    default:
+        INTERPRETER_ERROR(ENOTSUP, "Operating region space {:02X} not supported for evaluation!", opregion->space_raw());
+    }
+    VERIFY_NOT_REACHED();
+}
+
+ErrorOr<NodeData> Interpreter::evaluate_name(RefPtr<Node> const& node, Optional<NodeData> value_to_write)
+{
+    auto name_node = static_ptr_cast<NameNode>(node);
+    if (value_to_write.has_value())
+    {
+        INTERPRETER_ERROR(ENOTSUP, "Write to name not supported!");
+    }
+    return name_node->data();
+}
+
+ErrorOr<NodeData> Interpreter::evaluate_method(RefPtr<Node> const& node, Optional<NodeData> value_to_write, Optional<Vector<NodeData>> arguments)
+{
+    (void) value_to_write;
+    (void) arguments;
+
+    auto method_node = static_ptr_cast<MethodNode>(node);
+
+    // Create scope frame and assign arguments.
+    auto root_scope_frame = ScopeFrame(m_namespace_root, m_namespace_root, method_node->start(), method_node->length(), method_node->table_index());
+    if (arguments.has_value())
+    {
+        auto args = arguments.release_value();
+        VERIFY(args.size() < 7);
+
+        for (int i = 0; i < min(7, (int) args.size()); i++)
+        {
+            auto argument = static_cast<Argument>(i + (size_t) Argument::Zero);
+            root_scope_frame.set_argument(argument, args[i]);
+        }
+    }
+    m_scope_frames.push(root_scope_frame);
+
+    // Create opcode frame.
+    auto root_opcode_frame = TRY(OpcodeFrame::from_opcode((u16)MetaOpcode::End, method_node->start()));
+    m_opcode_frames.push(root_opcode_frame);
+
+    auto &stream = m_loaded_tables[method_node->table_index()];
+    TRY(stream.seek(method_node->start()));
+    // m_opcode_frames.size() > 0 && m_scope_frames.size() > 0
+    while (true) {
+        auto result = TRY(cycle(stream));
+        if (result == IterationDecision::Break) {
+            break;
+        }
+    }
+
+    m_opcode_frames.pop();
+    dbgln("Scope frames: {}", m_scope_frames.size());
+    dbgln("Opcode frames: {}", m_opcode_frames.size());
+    return NodeData();
+}
+
+ErrorOr<NodeData> Interpreter::evaluate(RefPtr<Node> const& node, Optional<NodeData> value_to_write, Optional<Vector<NodeData>> arguments)
+{
+    switch (node->type()) {
+    case NodeType::Field: return evaluate_field(node, value_to_write);
+    case NodeType::Name: return evaluate_name(node, value_to_write);
+    case NodeType::Method: return evaluate_method(node, value_to_write, arguments);
+
+    default: INTERPRETER_ERROR(ENOTSUP, "Cannot evaluate node of type {}!", (u32) node->type());
+    }
 }
 
 ErrorOr<IterationDecision> Interpreter::cycle(TableStream& stream)
@@ -579,10 +845,10 @@ ErrorOr<IterationDecision> Interpreter::cycle(TableStream& stream)
             dbgln("{}", name.to_string());
             auto node = TRY(m_scope_frames.top().find_node(name));
             if (node->type() == NodeType::Method) {
-                INTERPRETER_ERROR("cycle", "Methods unsupported!", "Hmm.");
+                INTERPRETER_ERROR(ENOTSUP, "Method call while reading opcode unsupported!");
             }
 
-            auto value = TRY(evaluate(node));
+            auto value = TRY(evaluate(node, {}, {}));
 
             dbgln("Evaluation successful... (name: {})", name.to_string());
             top_opcode_frame.append(value);
@@ -594,18 +860,10 @@ ErrorOr<IterationDecision> Interpreter::cycle(TableStream& stream)
 
         if (!top_opcode_frame.filter_opcode_for_next_operand(opcode)) {
             dbgln("Failure!");
-            INTERPRETER_ERROR("load", "Filtered opcode!", "Argument opcode {:04X} filtered by opcode {:04X}!", opcode, top_opcode_frame.opcode());
+            INTERPRETER_ERROR(EINVAL, "Argument opcode {:04X} filtered by opcode {:04X}!", opcode, top_opcode_frame.opcode());
         }
 
-        if ((opcode < 256) && TableStream::is_lead_name_char(opcode)) {
-            auto name_span = TRY(stream.read_in_place<u8>(4));
-            auto name = StringView(name_span);
-
-            INTERPRETER_ERROR("load", "Unimplemented method invocation!", "Tried to invoke method {}!", name);
-        } else {
-            (void)TRY(stream.read_opcode());
-        }
-
+        (void)TRY(stream.read_opcode());
         dbgln("Opcode: {:04X}", opcode);
 
         auto opcode_frame = TRY(OpcodeFrame::from_opcode(opcode, start));
@@ -666,7 +924,7 @@ ErrorOr<void> Interpreter::load(TableStream const& stream, bool ignore_block_hea
     if (!ignore_block_header) {
         auto checksum = TRY(stream_ref.generate_checksum());
         if (checksum != 0) {
-            INTERPRETER_ERROR("load", "Incorrect checksum!", "Checksum incorrect, expected 0 but got {}!", checksum);
+            INTERPRETER_ERROR(EINVAL, "Checksum incorrect, expected 0 but got {}!", checksum);
         }
 
         // Read table's block header.

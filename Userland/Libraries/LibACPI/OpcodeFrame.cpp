@@ -60,7 +60,7 @@ static Array<MetaOpcode, 4> method_operands = {
     MetaOpcode::End
 };
 
-static Array<MetaOpcode, 4> shift_left_operands = {
+static Array<MetaOpcode, 4> basic_arithmetic_operands = {
     MetaOpcode::TermArg,
     MetaOpcode::TermArg,
     MetaOpcode::Target,
@@ -99,6 +99,17 @@ static Array<MetaOpcode, 6> processor_operands = {
 static Array<MetaOpcode, 3> thermal_zone_operands = {
     MetaOpcode::PackageLength,
     MetaOpcode::NameString,
+    MetaOpcode::End
+};
+
+static Array<MetaOpcode, 3> store_operands = {
+    MetaOpcode::TermArg,
+    MetaOpcode::SuperName,
+    MetaOpcode::End
+};
+
+static Array<MetaOpcode, 3> return_operands = {
+    MetaOpcode::TermArg,
     MetaOpcode::End
 };
 
@@ -148,12 +159,32 @@ static ErrorOr<Span<MetaOpcode>> get_opcode_operand_template(u16 opcode)
     case (u16)Opcode::CreateQWordFieldOp:
         return create_unit_field_operands.span();
 
+    case (u16)Opcode::AddOp:
     case (u16)Opcode::ShiftLeftOp:
-        return shift_left_operands.span();
+        return basic_arithmetic_operands.span();
+    case (u16)Opcode::StoreOp:
+        return store_operands.span();
+    case (u16)Opcode::ReturnOp:
+        return return_operands.span();
 
     case (u16)Opcode::ZeroOp:
     case (u16)Opcode::OneOp:
     case (u16)Opcode::OnesOp:
+    case (u16)Opcode::Local0Op:
+    case (u16)Opcode::Local1Op:
+    case (u16)Opcode::Local2Op:
+    case (u16)Opcode::Local3Op:
+    case (u16)Opcode::Local4Op:
+    case (u16)Opcode::Local5Op:
+    case (u16)Opcode::Local6Op:
+    case (u16)Opcode::Local7Op:
+    case (u16)Opcode::Arg0Op:
+    case (u16)Opcode::Arg1Op:
+    case (u16)Opcode::Arg2Op:
+    case (u16)Opcode::Arg3Op:
+    case (u16)Opcode::Arg4Op:
+    case (u16)Opcode::Arg5Op:
+    case (u16)Opcode::Arg6Op:
     case (u16)MetaOpcode::End:
         return empty_operands.span();
     default:
@@ -196,8 +227,7 @@ static bool statement_filter(u16 opcode)
     // StatementOpcode := DefBreak | DefBreakPoint | DefContinue | DefFatal | DefIfElse | DefNoop | DefNotify | DefRelease | DefReset | DefReturn | DefSignal | DefSleep | DefStall | DefWhile
 
     // FIXME: Add support for statement opcodes.
-    (void)opcode;
-    return false;
+    return (opcode == (u16) Opcode::ReturnOp);
 }
 
 static bool expression_filter(u16 opcode)
@@ -205,8 +235,7 @@ static bool expression_filter(u16 opcode)
     // ExpressionOpcode := DefAcquire | DefAdd | DefAnd | DefBuffer | DefConcat | DefConcatRes | DefCondRefOf | DefCopyObject | DefDecrement | DefDerefOf | DefDivide | DefFindSetLeftBit | DefFindSetRightBit | DefFromBCD | DefIncrement | DefIndex | DefLAnd | DefLEqual | DefLGreater | DefLGreaterEqual | DefLLess | DefLLessEqual | DefMid | DefLNot | DefLNotEqual | DefLoadTable | DefLOr | DefMatch | DefMod | DefMultiply | DefNAnd | DefNOr | DefNot | DefObjectType | DefOr | DefPackage | DefVarPackage | DefRefOf | DefShiftLeft | DefShiftRight | DefSizeOf | DefStore | DefSubtract | DefTimer | DefToBCD | DefToBuffer | DefToDecimalString | DefToHexString | DefToInteger | DefToString | DefWait | DefXOr | MethodInvocation
 
     // FIXME: Add support for expression opcodes.
-    (void)opcode;
-    return false;
+    return (opcode == (u16)Opcode::StoreOp) || (opcode == (u16)Opcode::AddOp) || (opcode == (u16) Opcode::ShiftLeftOp);
 }
 
 static bool const_object_filter(u16 opcode)

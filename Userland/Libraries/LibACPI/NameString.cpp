@@ -119,7 +119,7 @@ ErrorOr<NameString> NameString::from_string(StringView const& str)
     size_t i = 0;
 
     // Header parsing works the same as the bytecode variant.
-    u8 initial = str[i++];
+    u8 initial = str[i];
     if (initial == '\\') {
         type = NameString::Type::Absolute;
         depth = 0;
@@ -152,14 +152,14 @@ ErrorOr<NameString> NameString::from_string(StringView const& str)
             return Error::from_string_literal("Invalid character found inside name segment.");
         }
 
-        if (str[i + 4] != '.' && str[i + 4] != 0) {
+        if ((i+4 < str.length()) && (str[i + 4] != '.' && str[i + 4] != 0)) {
             return Error::from_string_literal("Invalid name segment continuation.");
         }
         count++;
     }
 
     // Eugh.
-    auto view = str.substring_view(segment_start, count * 5);
+    auto view = str.substring_view(segment_start, ((count - 1) * 5) + 4);
     return NameString(type, depth, 1, count, view.bytes());
 }
 
@@ -207,7 +207,7 @@ ErrorOr<NameSegment> NameString::basename() const
     return segment(m_count - 1);
 }
 
-NameString NameString::clone(ByteBuffer& buf)
+NameString NameString::clone(ByteBuffer& buf) const
 {
     buf.resize(m_name_sequence.size());
     m_name_sequence.copy_to(buf);

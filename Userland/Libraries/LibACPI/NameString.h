@@ -41,6 +41,8 @@ public:
         Relative
     };
 
+    NameString() {}
+
     static ErrorOr<NameString> from_string(StringView const& str);
     static ErrorOr<NameString> from_table_stream(TableStream& stream);
 
@@ -55,7 +57,7 @@ public:
 
     // Clone namestring and its underlying data
     // into a heap allocated ByteBuffer.
-    NameString clone(ByteBuffer& buf);
+    NameString clone(ByteBuffer& buf) const;
 
 protected:
     NameString(Type type, size_t depth)

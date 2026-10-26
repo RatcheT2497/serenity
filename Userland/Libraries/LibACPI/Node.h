@@ -294,6 +294,7 @@ public:
     ssize_t table_index() const { return m_table_index; }
     size_t start() const { return m_start; }
     size_t end() const { return m_end; }
+    size_t length() const { return m_end - m_start; }
     u8 flags() const { return m_flags; }
     u8 arguments() const { return m_flags & 7; }
 
